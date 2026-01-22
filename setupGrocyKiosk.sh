@@ -94,6 +94,51 @@ promptYesNo() {
   done
 }
 
+# Add a directive within the first "location / { ... }" block if possible,
+# otherwise insert a basic "location /" block into the server block.
+ensureDirectiveInLocationRoot() {
+  local filePath="$1"
+  local directiveLine="$2"
+
+  if sudo grep -qF "${directiveLine}" "${filePath}"; then
+    return 0
+  fi
+
+  # If location / exists, insert directive before the closing brace of that block.
+  if sudo grep -Eq '^\s*location\s+/\s*\{' "${filePath}"; then
+    # Insert just before the first closing brace after "location / {"
+    sudo awk -v ins="${directiveLine}" '
+      BEGIN { inLoc=0; inserted=0 }
+      /^\s*location\s+\/\s*\{/ { inLoc=1 }
+      {
+        if (inLoc && !inserted && /^\s*\}/) {
+          print "        " ins
+          inserted=1
+          inLoc=0
+        }
+        print
+      }
+    ' "${filePath}" | sudo tee "${filePath}.tmp" >/dev/null
+    sudo mv "${filePath}.tmp" "${filePath}"
+    return 0
+  fi
+
+  # No location / block found -> inject a minimal one inside the first server block.
+  sudo awk -v ins="${directiveLine}" '
+    BEGIN { inserted=0 }
+    {
+      print
+      if (!inserted && $0 ~ /^\s*server\s*\{\s*$/) {
+        print "    location / {"
+        print "        " ins
+        print "    }"
+        inserted=1
+      }
+    }
+  ' "${filePath}" | sudo tee "${filePath}.tmp" >/dev/null
+  sudo mv "${filePath}.tmp" "${filePath}"
+}
+
 # -----------------------------
 # Install packages
 # -----------------------------
@@ -115,6 +160,26 @@ sudo apt install -y \
   evtest \
   nginx \
   git
+
+# -----------------------------
+# Enable gpio-shutdown overlay (GPIO3 / physical pin 5)
+# -----------------------------
+echo "==> Ensuring /boot/firmware/config.txt has dtoverlay=gpio-shutdown (GPIO3 / pin 5)"
+
+bootConfig="/boot/firmware/config.txt"
+overlayLine="dtoverlay=gpio-shutdown"
+
+if [[ ! -f "${bootConfig}" ]]; then
+  echo "WARNING: ${bootConfig} not found. Skipping gpio-shutdown overlay setup."
+else
+  if sudo grep -Fxq "${overlayLine}" "${bootConfig}"; then
+    echo "==> gpio-shutdown overlay already present"
+  else
+    echo "==> Adding gpio-shutdown overlay to ${bootConfig}"
+    echo "${overlayLine}" | sudo tee -a "${bootConfig}" >/dev/null
+    echo "==> NOTE: A reboot is required for gpio-shutdown to take effect."
+  fi
+fi
 
 echo "==> Ensuring user is in gpio group (may require logout/login to take effect)"
 if getent group gpio >/dev/null 2>&1; then
@@ -173,9 +238,14 @@ fi
 echo
 echo "==> Nginx configuration for Barcode Buddy"
 echo "You will be prompted for listen port and server_name (domain/IP)."
-
 listenPort="$(prompt "Listen port for Barcode Buddy nginx server block" "80")"
 serverName="$(prompt "server_name (domain or IP, space-separated allowed)" "_")"
+
+echo
+reverseProxyMode=0
+if promptYesNo "Is nginx acting as a reverse proxy in front of Barcode Buddy (proxy_pass)?" "n"; then
+  reverseProxyMode=1
+fi
 
 # Build config from the example, then apply your choices.
 echo "==> Preparing nginx config from Barcode Buddy example"
@@ -211,12 +281,10 @@ if [[ "${shouldWriteNginxConf}" -eq 1 ]]; then
     "s#root\s+/var/www/html/barcodebuddy/?;#root ${barcodeBuddyDir};#g" \
     "${tempConf}"
 
-  # Set listen port (handles patterns like "listen 80;" or "listen [::]:80;" conservatively)
-  # Replace any "listen 80;" with desired port; if example uses different port, add/replace first listen.
+  # Set listen port: replace first "listen N;" if present, else inject inside server block
   if sudo grep -Eq '^\s*listen\s+[0-9]+;' "${tempConf}"; then
     sudo sed -i -E "0,/^\s*listen\s+[0-9]+;/{s/^\s*listen\s+[0-9]+;/    listen ${listenPort};/}" "${tempConf}"
   else
-    # Insert listen inside the first server { block
     sudo sed -i -E "0,/server\s*\{/{s/server\s*\{/server {\n    listen ${listenPort};/}" "${tempConf}"
   fi
 
@@ -227,24 +295,32 @@ if [[ "${shouldWriteNginxConf}" -eq 1 ]]; then
     sudo sed -i -E "0,/server\s*\{/{s/server\s*\{/server {\n    server_name ${serverName};/}" "${tempConf}"
   fi
 
-  # -----------------------------
-  # SSE buffering prompt/fix
-  # -----------------------------
+  # -----------------------------------
+  # SSE buffering prompts / fixes
+  # -----------------------------------
   echo
-  echo "==> Barcode Buddy Screen/SSE buffering"
-  echo "Barcode Buddy docs recommend allowing the X-Accel-Buffering header through nginx for SSE,"
-  echo "otherwise the Screen module can break when buffering is enabled."
-  echo
-  if promptYesNo 'Apply "fastcgi_pass_header \"X-Accel-Buffering\";" to the PHP location block?' "y"; then
-    # Add fastcgi_pass_header if not already present, inside the PHP location block.
-    # We append it after the first fastcgi_pass line.
+  echo "==> Barcode Buddy Screen / SSE buffering"
+
+  # Case A: nginx -> php-fpm (fastcgi). Pass header through if user wants.
+  if promptYesNo 'Apply "fastcgi_pass_header \"X-Accel-Buffering\";" in the PHP location block?' "y"; then
     if ! sudo grep -q 'fastcgi_pass_header\s+"X-Accel-Buffering"' "${tempConf}"; then
       sudo sed -i -E \
         '0,/fastcgi_pass\s+unix:\/var\/run\/php\/php8\.4-fpm\.sock;/{s#(fastcgi_pass\s+unix:/var/run/php/php8\.4-fpm\.sock;)#\1\n        fastcgi_pass_header "X-Accel-Buffering";#}' \
         "${tempConf}"
     fi
   else
-    echo "Leaving SSE buffering setting unchanged."
+    echo "Leaving fastcgi SSE header setting unchanged."
+  fi
+
+  # Case B: nginx is reverse-proxying to an upstream (proxy_pass). Disable proxy buffering if user wants.
+  if [[ "${reverseProxyMode}" -eq 1 ]]; then
+    echo
+    echo "Reverse proxy mode detected."
+    if promptYesNo 'Disable proxy buffering for SSE by adding "proxy_buffering off;" (recommended for SSE)?' "y"; then
+      ensureDirectiveInLocationRoot "${tempConf}" "proxy_buffering off;"
+    else
+      echo "Leaving proxy buffering unchanged."
+    fi
   fi
 
   sudo mkdir -p "${nginxSitesAvailable}"
