@@ -1,0 +1,13 @@
+[Unit]
+Description=Grocy Kiosk
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/chromium http://localhost/screen.php --kiosk --noerrdialogs --no-first-run --enable-features=OverlayScrollbar --start-maximized
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target
