@@ -36,7 +36,8 @@ userSystemdDir="${HOME}/.config/systemd/user"
 buttonsUnitDst="${userSystemdDir}/grocy-buttons.service"
 kioskUnitDst="${userSystemdDir}/grocy-kiosk.service"
 
-barcodeBuddyRepoUrl="https://github.com/Forceu/barcodebuddy.git"
+#barcodeBuddyRepoUrl="https://github.com/Forceu/barcodebuddy.git"
+barcodeBuddyRepoUrl="https://github.com/evotodi/barcodebuddy.git"
 barcodeBuddyDir="/var/www/html/barcodebuddy"
 
 nginxSitesAvailable="/etc/nginx/sites-available"
@@ -154,12 +155,14 @@ sudo apt install -y \
   php8.4-mbstring \
   php8.4-sqlite3 \
   php8.4-redis \
+  php8.4-xml \
   redis \
   redis-server \
   screen \
   evtest \
   nginx \
-  git
+  git \
+  composer
 
 # -----------------------------
 # Enable gpio-shutdown overlay (GPIO3 / physical pin 5)
@@ -210,11 +213,15 @@ else
   echo "==> Cloning Barcode Buddy into ${barcodeBuddyDir}"
   sudo mkdir -p "$(dirname "${barcodeBuddyDir}")"
   sudo git clone "${barcodeBuddyRepoUrl}" "${barcodeBuddyDir}"
+  sudo git config --global --add safe.directory "${barcodeBuddyDir}"
 fi
+sudo COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --working-dir "${barcodeBuddyDir}"
 
-echo "==> Setting permissions for Barcode Buddy data directory"
+
+echo "==> Setting permissions for Barcode Buddy directory"
+sudo chmod -R ugo+rw "${barcodeBuddyDir}"
 sudo mkdir -p "${barcodeBuddyDir}/data"
-sudo chown -R www-data:www-data "${barcodeBuddyDir}/data"
+sudo chown -R www-data:www-data "${barcodeBuddyDir}"
 sudo chmod -R u+rwX,g+rwX,o-rwx "${barcodeBuddyDir}/data"
 
 # -----------------------------
