@@ -26,7 +26,8 @@ done
 # -----------------------------
 # Paths / Names
 # -----------------------------
-projectDir="${HOME}/GrocyKioskCtrl"
+scriptDir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="${scriptDir}"
 
 buttonsPy="${projectDir}/grocyButtons.py"
 buttonsUnitSrc="${projectDir}/grocy-buttons.service"
@@ -52,8 +53,8 @@ nginxService="nginx"
 
 bbScannerUnit="/etc/systemd/system/bbscanner.service"
 bbServerUnit="/etc/systemd/system/bbserver.service"
-grabInputExample="${barcodeBuddyDir}/example/grabInput.sh"
-grabInputLink="/usr/local/bin/grabInput.sh"
+grabInputSrc="${projectDir}/grabInput.sh"
+grabInputDest="/usr/local/bin/grabInput.sh"
 
 # -----------------------------
 # Helpers
@@ -248,38 +249,100 @@ sudo chmod -R ugo+rwx "${barcodeBuddyDir}/data"
 echo
 echo "==> Barcode Buddy: installing bbserver/bbscanner systemd services"
 
-if [[ ! -f "${grabInputExample}" ]]; then
-  echo "ERROR: Cannot find ${grabInputExample}"
+requireFile "${grabInputSrc}"
+
+# Install our managed grabInput.sh (do not symlink to Barcode Buddy example)
+echo "==> Installing grabInput.sh to ${grabInputDest}"
+
+# If an old symlink exists, remove it so `install` doesn't overwrite the symlink target.
+if [[ -L "${grabInputDest}" ]]; then
+  echo "==> Removing old symlink: ${grabInputDest} -> $(readlink "${grabInputDest}")"
+  sudo rm -f "${grabInputDest}"
+elif [[ -e "${grabInputDest}" && ! -f "${grabInputDest}" ]]; then
+  echo "ERROR: ${grabInputDest} exists but is not a regular file or symlink. Please remove it manually."
   exit 1
 fi
 
-# Ensure /usr/local/bin/grabInput.sh exists (symlink) and is executable
-if [[ -e "${grabInputLink}" ]]; then
-  echo "==> ${grabInputLink} already exists"
-else
-  echo "==> Creating symlink: ${grabInputLink} -> ${grabInputExample}"
-  sudo ln -s "${grabInputExample}" "${grabInputLink}"
-fi
-sudo chmod +x "${grabInputExample}" "${grabInputLink}" || true
+sudo install -o root -g root -m 0755 "${grabInputSrc}" "${grabInputDest}"
 
-echo
 echo "Find your scanner device with one of:"
 echo "  ls -l /dev/input/by-id/"
 echo "  ls -l /dev/input/by-path/"
 defaultScannerDev="/dev/input/by-id/usb-0581_011a-event-kbd"
 scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
 
+echo
+bbWwwUser="$(prompt "Barcode Buddy www user (used to run scan jobs)" "www-data")"
+bbUseCurl="false"
+bbServerAddress=""
+bbApiKey=""
+bbSpecialBarcode="YOUR_CUSTOM_BARCODE"
+bbSpecialActionFile="/etc/barcodebuddy/specialAction.sh"
+
+if promptYesNo "Use curl to send scans to an external Barcode Buddy server?" "n"; then
+  bbUseCurl="true"
+  bbServerAddress="$(prompt "Barcode Buddy server address (base URL, e.g. https://example/api/)" "https://your.bbuddy.url/api/")"
+  bbApiKey="$(prompt "Barcode Buddy API key" "YOUR_API_KEY")"
+fi
+
+if promptYesNo "Use a special barcode for custom action?" "n"; then
+  bbSpecialBarcode="$(prompt "Enter your special barcode" "YOUR_CUSTOM_BARCODE")"
+  bbSpecialActionFile="$(prompt "Where is your special action file?" "/etc/barcodebuddy/specialAction.sh")"
+  echo "To create the special action file:"
+  echo "  sudo mkdir -p /etc/barcodebuddy"
+  echo "  sudo nano /etc/barcodebuddy/specialAction.sh"
+  echo ""
+  echo "Example contents:"
+  echo '\
+#!/bin/bash
+specialActionUser() {
+  echo "[specialActionUser] do something fun here"
+  # e.g. play a sound, toggle a GPIO, call a local script, etc.
+}
+'
+  echo "The specialActionUser fuction will be called when you scan your special barcode"
+fi
+
+
 echo "==> Writing ${bbServerUnit}"
 sudo tee "${bbServerUnit}" >/dev/null <<EOF
 [Unit]
 Description=Run websocket server for barcodebuddy screen feature
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
+
+# Pre-flight checks for clearer failures
+ExecStartPre=/bin/sh -lc 'command -v /usr/bin/php >/dev/null 2>&1 || { echo "[bbserver] ERROR: php not found at /usr/bin/php"; exit 1; }'
+ExecStartPre=/bin/sh -lc 'test -f "${barcodeBuddyDir}/wsserver.php" || { echo "[bbserver] ERROR: wsserver.php not found: ${barcodeBuddyDir}/wsserver.php"; exit 1; }'
+
 ExecStart=/usr/bin/php ${barcodeBuddyDir}/wsserver.php
-StandardOutput=null
 Restart=on-failure
+RestartSec=2
+
 User=www-data
+Group=www-data
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bbserver
+
+# Lightweight hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
@@ -289,12 +352,46 @@ echo "==> Writing ${bbScannerUnit}"
 sudo tee "${bbScannerUnit}" >/dev/null <<EOF
 [Unit]
 Description=Grab barcode scans for barcode buddy
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${grabInputLink} ${scannerDev}
-StandardOutput=null
+
+# Pre-flight info + checks so failures are obvious in journald
+ExecStartPre=/bin/sh -lc 'echo "[bbscanner] Using device path: ${scannerDev}"; if command -v readlink >/dev/null 2>&1; then echo "[bbscanner] Resolved device target: $(readlink -f "${scannerDev}" 2>/dev/null || echo "(unresolved)")"; fi'
+ExecStartPre=/bin/sh -lc 'test -e "${scannerDev}" || { echo "[bbscanner] ERROR: input device not found: ${scannerDev}"; echo "[bbscanner] Hint: ls -l /dev/input/by-id/"; exit 1; }'
+ExecStartPre=/bin/sh -lc 'test -x "${grabInputDest}" || { echo "[bbscanner] ERROR: grabInput.sh not executable: ${grabInputDest}"; exit 1; }'
+
+ExecStart=${grabInputDest} ${scannerDev}
 Restart=on-failure
+RestartSec=2
+
+# Logging (keep logs for troubleshooting)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bbscanner
+
+# Environment used by grabInput.sh
+Environment=SCRIPT_LOCATION=${barcodeBuddyDir}/index.php
+Environment=USE_CURL=${bbUseCurl}
+Environment=WWW_USER=${bbWwwUser}
+Environment=SERVER_ADDRESS=${bbServerAddress}
+Environment=API_KEY=${bbApiKey}
+Environment=SPECIAL_BARCODE=${bbSpecialBarcode}
+Environment=SPECIAL_ACTION_FILE=${bbSpecialActionFile}
+
+# Lightweight hardening (service runs as root to use evtest --grab)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
