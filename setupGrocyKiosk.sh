@@ -50,6 +50,11 @@ phpFpmService="php8.4-fpm"
 redisService="redis-server"
 nginxService="nginx"
 
+bbScannerUnit="/etc/systemd/system/bbscanner.service"
+bbServerUnit="/etc/systemd/system/bbserver.service"
+grabInputExample="${barcodeBuddyDir}/example/grabInput.sh"
+grabInputLink="/usr/local/bin/grabInput.sh"
+
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -203,6 +208,10 @@ fi
 
 if [[ -d "${barcodeBuddyDir}/.git" ]]; then
   echo "==> Barcode Buddy already present, updating via git pull"
+  # Mark repo as safe for git, since we run git commands via sudo (root) but the dir may be owned by www-data.
+  if ! sudo git config --system --get-all safe.directory 2>/dev/null | grep -Fxq "${barcodeBuddyDir}"; then
+    sudo git config --system --add safe.directory "${barcodeBuddyDir}"
+  fi
   sudo git -C "${barcodeBuddyDir}" fetch --all --prune
   sudo git -C "${barcodeBuddyDir}" pull --ff-only
 elif [[ -d "${barcodeBuddyDir}" ]]; then
@@ -213,8 +222,17 @@ else
   echo "==> Cloning Barcode Buddy into ${barcodeBuddyDir}"
   sudo mkdir -p "$(dirname "${barcodeBuddyDir}")"
   sudo git clone "${barcodeBuddyRepoUrl}" "${barcodeBuddyDir}"
-  sudo git config --global --add safe.directory "${barcodeBuddyDir}"
+  # Mark repo as safe for git, since we run git commands via sudo (root) but the dir may be owned by www-data.
+  if ! sudo git config --system --get-all safe.directory 2>/dev/null | grep -Fxq "${barcodeBuddyDir}"; then
+    sudo git config --system --add safe.directory "${barcodeBuddyDir}"
+  fi
 fi
+
+# Also ensure safety in the update path (in case repo existed before this script version)
+if ! sudo git config --system --get-all safe.directory 2>/dev/null | grep -Fxq "${barcodeBuddyDir}"; then
+  sudo git config --system --add safe.directory "${barcodeBuddyDir}"
+fi
+
 sudo COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --working-dir "${barcodeBuddyDir}"
 
 
@@ -222,7 +240,74 @@ echo "==> Setting permissions for Barcode Buddy directory"
 sudo chmod -R ugo+rw "${barcodeBuddyDir}"
 sudo mkdir -p "${barcodeBuddyDir}/data"
 sudo chown -R www-data:www-data "${barcodeBuddyDir}"
-sudo chmod -R u+rwX,g+rwX,o-rwx "${barcodeBuddyDir}/data"
+sudo chmod -R ugo+rwx "${barcodeBuddyDir}/data"
+
+# -----------------------------
+# Barcode Buddy screen/scanner services (systemd)
+# -----------------------------
+echo
+echo "==> Barcode Buddy: installing bbserver/bbscanner systemd services"
+
+if [[ ! -f "${grabInputExample}" ]]; then
+  echo "ERROR: Cannot find ${grabInputExample}"
+  exit 1
+fi
+
+# Ensure /usr/local/bin/grabInput.sh exists (symlink) and is executable
+if [[ -e "${grabInputLink}" ]]; then
+  echo "==> ${grabInputLink} already exists"
+else
+  echo "==> Creating symlink: ${grabInputLink} -> ${grabInputExample}"
+  sudo ln -s "${grabInputExample}" "${grabInputLink}"
+fi
+sudo chmod +x "${grabInputExample}" "${grabInputLink}" || true
+
+echo
+echo "Find your scanner device with one of:"
+echo "  ls -l /dev/input/by-id/"
+echo "  ls -l /dev/input/by-path/"
+defaultScannerDev="/dev/input/by-id/usb-0581_011a-event-kbd"
+scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
+
+echo "==> Writing ${bbServerUnit}"
+sudo tee "${bbServerUnit}" >/dev/null <<EOF
+[Unit]
+Description=Run websocket server for barcodebuddy screen feature
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/php ${barcodeBuddyDir}/wsserver.php
+StandardOutput=null
+Restart=on-failure
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "==> Writing ${bbScannerUnit}"
+sudo tee "${bbScannerUnit}" >/dev/null <<EOF
+[Unit]
+Description=Grab barcode scans for barcode buddy
+
+[Service]
+Type=simple
+ExecStart=${grabInputLink} ${scannerDev}
+StandardOutput=null
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "==> Enabling and starting bbserver/bbscanner"
+sudo systemctl daemon-reload
+sudo systemctl enable --now bbserver.service
+sudo systemctl enable --now bbscanner.service
+
+echo "==> Barcode Buddy services status:"
+sudo systemctl --no-pager status bbserver.service || true
+sudo systemctl --no-pager status bbscanner.service || true
 
 # -----------------------------
 # PHP-FPM config tweak
@@ -391,6 +476,8 @@ echo "journalctl --user -u grocy-buttons.service -f"
 echo "journalctl --user -u grocy-kiosk.service -f"
 echo "sudo journalctl -u ${nginxService} -f"
 echo "sudo journalctl -u ${phpFpmService} -f"
+echo "sudo journalctl -u bbscanner.service -f"
+echo "sudo journalctl -u bbserver.service -f"
 echo
 echo "DONE."
 echo "Note: If gpio group membership was newly added, log out and back in (or reboot) once."
