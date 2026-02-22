@@ -192,7 +192,10 @@ launch_scan_job() {
     return 0
   fi
 
-  local unit="bbscan-$(date +%s%N)"
+  local unit
+  unit="bbscan-$(date +%s%N)"
+
+  log "Sending to unit ${unit}"
 
   /usr/bin/systemd-run \
     --quiet \
@@ -209,6 +212,9 @@ launch_scan_job() {
 
 send_via_curl() {
   local barcode="$1"
+
+  log "Sending barcode ${barcode} via curl"
+
   curl --fail-with-body --silent --show-error \
     --get \
     --data-urlencode "add=${barcode}" \
@@ -230,6 +236,7 @@ log "Waiting for scanner input on ${deviceToUse}"
 evtest --grab "$deviceToUse" | while read -r line; do
   if [[ "${DEBUG_EVTEST}" == "true" ]]; then
     log "evtest grabbed: ${line}"
+    log "enteredText: ${enteredText}"
   fi
   key="$(returnAllowedCharacter "{$line}")"
   if [[ "$key" != "$NON_ALLOWED_CHAR" ]]; then

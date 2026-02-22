@@ -2,26 +2,191 @@
 set -euo pipefail
 
 # -----------------------------
-# Flags
+# Flags / Args
 # -----------------------------
 cleanBarcodeBuddy=0
 
-for arg in "$@"; do
-  case "${arg}" in
+arg_special_barcode=""
+arg_special_barcode_file=""
+arg_input_device=""
+arg_www_user=""
+arg_listen_port=""
+arg_server_name=""
+arg_reverse_proxy=0
+arg_use_curl=0
+arg_api_key=""
+arg_server_address=""
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+is_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  (( 1 <= 10#$1 && 10#$1 <= 65535 ))
+}
+
+is_http_url() {
+  [[ "$1" =~ ^https?://.+ ]]
+}
+
+runtime_check_user_exists() {
+  local u="$1"
+  getent passwd "$u" >/dev/null 2>&1 || die "User does not exist: ${u}"
+}
+
+runtime_check_input_device() {
+  local dev="$1"
+  [[ -e "$dev" ]] || die "Input device does not exist: ${dev}"
+}
+
+runtime_check_url_reachable_hint() {
+  local url="$1"
+  # Don't fail the install if network/DNS isn't up; just provide a helpful warning.
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsS --max-time 5 -o /dev/null "${url}" 2>/dev/null; then
+      echo "WARNING: Could not reach server-address quickly: ${url}"
+      echo "         This may be normal if networking/DNS isn't ready yet."
+    fi
+  fi
+}
+
+runtime_check_special_action_dir() {
+  local p="$1"
+  local d=""
+  d="$(dirname -- "$p")"
+  if [[ ! -d "${d}" ]]; then
+    echo "WARNING: Special action directory does not exist yet: ${d}"
+    echo "         You can create it later (e.g. sudo mkdir -p \"${d}\")."
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage: setupGrocyKiosk.sh [options]
+
+Options:
+  --clean-barcodebuddy
+
+  --input-device <path>                 (e.g. /dev/input/by-id/...event-kbd)
+  --www-user <user>                     (default: www-data)
+
+  --special-barcode <barcode>
+  --special-barcode-file <path>         (default: /etc/barcodebuddy/specialAction.sh)
+
+  --listen-port <port>                  (default: 80)
+  --server-name <name>                  (default: _)
+  --reverse-proxy                       (set reverse proxy mode; skips prompt)
+
+  --use-curl                            (flag; send scans via curl to external BB)
+  --server-address <url>                (e.g. https://example/api/)
+  --api-key <key>
+
+  -h, --help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --clean-barcodebuddy)
       cleanBarcodeBuddy=1
+      shift
+      ;;
+    --special-barcode)
+      [[ $# -ge 2 ]] || die "--special-barcode requires a value"
+      arg_special_barcode="$2"
+      shift 2
+      ;;
+    --special-barcode-file)
+      [[ $# -ge 2 ]] || die "--special-barcode-file requires a value"
+      arg_special_barcode_file="$2"
+      shift 2
+      ;;
+    --input-device)
+      [[ $# -ge 2 ]] || die "--input-device requires a value"
+      arg_input_device="$2"
+      shift 2
+      ;;
+    --www-user)
+      [[ $# -ge 2 ]] || die "--www-user requires a value"
+      arg_www_user="$2"
+      shift 2
+      ;;
+    --listen-port)
+      [[ $# -ge 2 ]] || die "--listen-port requires a value"
+      arg_listen_port="$2"
+      shift 2
+      ;;
+    --server-name)
+      [[ $# -ge 2 ]] || die "--server-name requires a value"
+      arg_server_name="$2"
+      shift 2
+      ;;
+    --reverse-proxy)
+      arg_reverse_proxy=1
+      shift
+      ;;
+    --use-curl)
+      arg_use_curl=1
+      shift
+      ;;
+    --api-key)
+      [[ $# -ge 2 ]] || die "--api-key requires a value"
+      arg_api_key="$2"
+      shift 2
+      ;;
+    --server-address)
+      [[ $# -ge 2 ]] || die "--server-address requires a value"
+      arg_server_address="$2"
+      shift 2
       ;;
     -h|--help)
-      echo "Usage: $0 [--clean-barcodebuddy]"
+      usage
       exit 0
       ;;
     *)
-      echo "Unknown argument: ${arg}"
-      echo "Use --help for usage."
-      exit 1
+      die "Unknown argument: $1"
       ;;
   esac
 done
+
+# -----------------------------
+# Argument validations (syntax)
+# -----------------------------
+if [[ -n "${arg_listen_port}" ]] && ! is_port "${arg_listen_port}"; then
+  die "--listen-port must be an integer 1..65535 (got: ${arg_listen_port})"
+fi
+
+if [[ "${arg_use_curl}" -eq 1 ]]; then
+  [[ -n "${arg_server_address}" ]] || die "--use-curl requires --server-address"
+  [[ -n "${arg_api_key}" ]] || die "--use-curl requires --api-key"
+  is_http_url "${arg_server_address}" || die "--server-address must start with http:// or https:// (got: ${arg_server_address})"
+fi
+
+if [[ -n "${arg_server_address}" ]] && ! is_http_url "${arg_server_address}"; then
+  die "--server-address must start with http:// or https:// (got: ${arg_server_address})"
+fi
+
+if [[ -n "${arg_input_device}" ]] && [[ "${arg_input_device}" != /dev/input/* ]]; then
+  die "--input-device must be under /dev/input/ (got: ${arg_input_device})"
+fi
+
+if [[ -n "${arg_special_barcode_file}" ]] && [[ "${arg_special_barcode_file}" != /* ]]; then
+  die "--special-barcode-file must be an absolute path (got: ${arg_special_barcode_file})"
+fi
+
+# -----------------------------
+# Argument validations (runtime)
+# -----------------------------
+if [[ -n "${arg_www_user}" ]]; then
+  runtime_check_user_exists "${arg_www_user}"
+fi
+
+if [[ -n "${arg_input_device}" ]]; then
+  runtime_check_input_device "${arg_input_device}"
+fi
+
+if [[ "${arg_use_curl}" -eq 1 ]]; then
+  runtime_check_url_reachable_hint "${arg_server_address}"
+fi
 
 # -----------------------------
 # Paths / Names
@@ -273,40 +438,91 @@ sudo install -o root -g root -m 0755 "${grabInputSrc}" "${grabInputDest}"
 echo "Find your scanner device with one of:"
 echo "  ls -l /dev/input/by-id/"
 echo "  ls -l /dev/input/by-path/"
-scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
+if [[ -n "${arg_input_device}" ]]; then
+  scannerDev="${arg_input_device}"
+else
+  scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
+fi
 
 echo
-bbWwwUser="$(prompt "Barcode Buddy www user (used to run scan jobs)" "www-data")"
+if [[ -n "${arg_www_user}" ]]; then
+  bbWwwUser="${arg_www_user}"
+else
+  bbWwwUser="$(prompt "Barcode Buddy www user (used to run scan jobs)" "www-data")"
+fi
+
 bbUseCurl="false"
 bbServerAddress=""
 bbApiKey=""
 bbSpecialBarcode="${defaultSpecialBarcode}"
 bbSpecialActionFile="/etc/barcodebuddy/specialAction.sh"
 
-if promptYesNo "Use curl to send scans to an external Barcode Buddy server?" "n"; then
+# Curl mode: if --use-curl supplied, do not prompt yes/no, only prompt for missing details.
+if [[ "${arg_use_curl}" -eq 1 ]]; then
   bbUseCurl="true"
-  bbServerAddress="$(prompt "Barcode Buddy server address (base URL, e.g. https://example/api/)" "https://your.bbuddy.url/api/")"
-  bbApiKey="$(prompt "Barcode Buddy API key" "YOUR_API_KEY")"
+  if [[ -n "${arg_server_address}" ]]; then
+    bbServerAddress="${arg_server_address}"
+  else
+    bbServerAddress="$(prompt "Barcode Buddy server address (base URL, e.g. https://example/api/)" "https://your.bbuddy.url/api/")"
+  fi
+  if [[ -n "${arg_api_key}" ]]; then
+    bbApiKey="${arg_api_key}"
+  else
+    bbApiKey="$(prompt "Barcode Buddy API key" "YOUR_API_KEY")"
+  fi
+else
+  if promptYesNo "Use curl to send scans to an external Barcode Buddy server?" "n"; then
+    bbUseCurl="true"
+    bbServerAddress="$(prompt "Barcode Buddy server address (base URL, e.g. https://example/api/)" "https://your.bbuddy.url/api/")"
+    bbApiKey="$(prompt "Barcode Buddy API key" "YOUR_API_KEY")"
+  fi
 fi
 
-if promptYesNo "Use a special barcode for custom action?" "n"; then
-  bbSpecialBarcode="$(prompt "Enter your special barcode (Do not use underscores)" "${defaultSpecialBarcode}")"
-  bbSpecialActionFile="$(prompt "Where is your special action file?" "/etc/barcodebuddy/specialAction.sh")"
-  echo "To create the special action file:"
-  echo "  sudo mkdir -p /etc/barcodebuddy"
-  echo "  sudo nano /etc/barcodebuddy/specialAction.sh"
-  echo ""
-  echo "Example contents:"
-  echo '\
+# Special barcode: if args supplied, skip prompt and use them.
+if [[ -n "${arg_special_barcode}" || -n "${arg_special_barcode_file}" ]]; then
+  if [[ -n "${arg_special_barcode}" ]]; then
+    bbSpecialBarcode="${arg_special_barcode}"
+  fi
+  if [[ -n "${arg_special_barcode_file}" ]]; then
+    bbSpecialActionFile="${arg_special_barcode_file}"
+  fi
+else
+  if promptYesNo "Use a special barcode for custom action?" "n"; then
+    bbSpecialBarcode="$(prompt "Enter your special barcode (Do not use underscores)" "${defaultSpecialBarcode}")"
+    bbSpecialActionFile="$(prompt "Where is your special action file?" "/etc/barcodebuddy/specialAction.sh")"
+    echo "To create the special action file:"
+    echo "  sudo mkdir -p /etc/barcodebuddy"
+    echo "  sudo nano /etc/barcodebuddy/specialAction.sh"
+    echo ""
+    echo "Example contents:"
+    echo '\
 #!/bin/bash
 specialActionUser() {
   echo "[specialActionUser] do something fun here"
   # e.g. play a sound, toggle a GPIO, call a local script, etc.
 }
 '
-  echo "The specialActionUser fuction will be called when you scan your special barcode"
+    echo "The specialActionUser fuction will be called when you scan your special barcode"
+  fi
 fi
 
+# -----------------------------
+# Runtime checks (final resolved values, including prompts)
+# -----------------------------
+runtime_check_user_exists "${bbWwwUser}"
+runtime_check_input_device "${scannerDev}"
+
+if [[ "${bbUseCurl}" == "true" ]]; then
+  [[ -n "${bbServerAddress}" ]] || die "curl mode enabled but SERVER_ADDRESS is empty"
+  [[ -n "${bbApiKey}" ]] || die "curl mode enabled but API_KEY is empty"
+  is_http_url "${bbServerAddress}" || die "SERVER_ADDRESS must start with http:// or https:// (got: ${bbServerAddress})"
+  runtime_check_url_reachable_hint "${bbServerAddress}"
+fi
+
+if [[ -n "${bbSpecialBarcode}" ]] && [[ "${bbSpecialActionFile}" != /* ]]; then
+  die "SPECIAL_ACTION_FILE must be an absolute path (got: ${bbSpecialActionFile})"
+fi
+runtime_check_special_action_dir "${bbSpecialActionFile}"
 
 echo "==> Writing ${bbServerUnit}"
 sudo tee "${bbServerUnit}" >/dev/null <<EOF
@@ -431,13 +647,27 @@ fi
 echo
 echo "==> Nginx configuration for Barcode Buddy"
 echo "You will be prompted for listen port and server_name (domain/IP)."
-listenPort="$(prompt "Listen port for Barcode Buddy nginx server block" "80")"
-serverName="$(prompt "server_name (domain or IP, space-separated allowed)" "_")"
+
+if [[ -n "${arg_listen_port}" ]]; then
+  listenPort="${arg_listen_port}"
+else
+  listenPort="$(prompt "Listen port for Barcode Buddy nginx server block" "80")"
+fi
+
+if [[ -n "${arg_server_name}" ]]; then
+  serverName="${arg_server_name}"
+else
+  serverName="$(prompt "server_name (domain or IP, space-separated allowed)" "_")"
+fi
 
 echo
 reverseProxyMode=0
-if promptYesNo "Is nginx acting as a reverse proxy in front of Barcode Buddy (proxy_pass)?" "n"; then
+if [[ "${arg_reverse_proxy}" -eq 1 ]]; then
   reverseProxyMode=1
+else
+  if promptYesNo "Is nginx acting as a reverse proxy in front of Barcode Buddy (proxy_pass)?" "n"; then
+    reverseProxyMode=1
+  fi
 fi
 
 # Build config from the example, then apply your choices.
