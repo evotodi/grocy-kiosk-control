@@ -13,7 +13,7 @@ IS_DOCKER="${IS_DOCKER:="false"}"
 API_KEY="${API_KEY:="YOUR_API_KEY"}"
 
 # Set a custom barcode below. If this barcode is scanned, specialAction() will be executed
-SPECIAL_BARCODE="${SPECIAL_BARCODE:="YOUR-CUSTOM-BARCODE"}"
+SPECIAL_BARCODE="${SPECIAL_BARCODE:="YOUR-SPECIAL-BARCODE"}"
 
 # Optional: user hook file for special barcode actions (sourced if present).
 # Recommended location for local customization:
