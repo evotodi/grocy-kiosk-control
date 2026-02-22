@@ -37,6 +37,7 @@ userSystemdDir="${HOME}/.config/systemd/user"
 buttonsUnitDst="${userSystemdDir}/grocy-buttons.service"
 kioskUnitDst="${userSystemdDir}/grocy-kiosk.service"
 
+# todo: Change back to Forcue repo when PRs are merged
 #barcodeBuddyRepoUrl="https://github.com/Forceu/barcodebuddy.git"
 barcodeBuddyRepoUrl="https://github.com/evotodi/barcodebuddy.git"
 barcodeBuddyDir="/var/www/html/barcodebuddy"
@@ -268,7 +269,7 @@ sudo install -o root -g root -m 0755 "${grabInputSrc}" "${grabInputDest}"
 echo "Find your scanner device with one of:"
 echo "  ls -l /dev/input/by-id/"
 echo "  ls -l /dev/input/by-path/"
-defaultScannerDev="/dev/input/by-id/usb-0581_011a-event-kbd"
+defaultScannerDev="/dev/input/event0"
 scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
 
 echo
