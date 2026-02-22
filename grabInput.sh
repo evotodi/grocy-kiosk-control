@@ -13,11 +13,13 @@ IS_DOCKER="${IS_DOCKER:="false"}"
 API_KEY="${API_KEY:="YOUR_API_KEY"}"
 
 # Set a custom barcode below. If this barcode is scanned, specialAction() will be executed
-SPECIAL_BARCODE="${SPECIAL_BARCODE:="YOUR_CUSTOM_BARCODE"}"
+SPECIAL_BARCODE="${SPECIAL_BARCODE:="YOUR-CUSTOM-BARCODE"}"
 
 # Optional: user hook file for special barcode actions (sourced if present).
 # Recommended location for local customization:
 SPECIAL_ACTION_FILE="${SPECIAL_ACTION_FILE:="/etc/barcodebuddy/specialAction.sh"}"
+
+DEBUG_EVTEST=false
 
 log() { echo "[ScannerConnection] $*"; }
 
@@ -213,9 +215,22 @@ send_via_curl() {
     "${SERVER_ADDRESS}action/scan?apikey=${API_KEY}"
 }
 
+log "Script location: ${SCRIPT_LOCATION}"
+log "WWW User: ${WWW_USER}"
+log "Use curl: ${USE_CURL}"
+if [[ "${USE_CURL}" == "true" ]]; then
+  log "Server address: ${SERVER_ADDRESS}"
+  log "Api key: ${API_KEY}"
+fi
+log "Special barcode: ${SPECIAL_BARCODE}"
+log "Special action file: ${SPECIAL_ACTION_FILE}"
+
 enteredText=""
 log "Waiting for scanner input on ${deviceToUse}"
 evtest --grab "$deviceToUse" | while read -r line; do
+  if [[ "${DEBUG_EVTEST}" == "true" ]]; then
+    log "evtest grabbed: ${line}"
+  fi
   key="$(returnAllowedCharacter "{$line}")"
   if [[ "$key" != "$NON_ALLOWED_CHAR" ]]; then
     if [[ "$key" != "KEY_ENTER" ]]; then

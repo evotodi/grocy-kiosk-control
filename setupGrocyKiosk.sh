@@ -29,6 +29,9 @@ done
 scriptDir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 projectDir="${scriptDir}"
 
+defaultScannerDev="/dev/input/event0"
+defaultSpecialBarcode="YOUR-SPECIAL-BARCODE"
+
 buttonsPy="${projectDir}/grocyButtons.py"
 buttonsUnitSrc="${projectDir}/grocy-buttons.service"
 kioskUnitSrc="${projectDir}/grocy-kiosk.service"
@@ -56,6 +59,7 @@ bbScannerUnit="/etc/systemd/system/bbscanner.service"
 bbServerUnit="/etc/systemd/system/bbserver.service"
 grabInputSrc="${projectDir}/grabInput.sh"
 grabInputDest="/usr/local/bin/grabInput.sh"
+
 
 # -----------------------------
 # Helpers
@@ -269,7 +273,6 @@ sudo install -o root -g root -m 0755 "${grabInputSrc}" "${grabInputDest}"
 echo "Find your scanner device with one of:"
 echo "  ls -l /dev/input/by-id/"
 echo "  ls -l /dev/input/by-path/"
-defaultScannerDev="/dev/input/event0"
 scannerDev="$(prompt "Path to barcode scanner input device (event-kbd)" "${defaultScannerDev}")"
 
 echo
@@ -277,7 +280,7 @@ bbWwwUser="$(prompt "Barcode Buddy www user (used to run scan jobs)" "www-data")
 bbUseCurl="false"
 bbServerAddress=""
 bbApiKey=""
-bbSpecialBarcode="YOUR_CUSTOM_BARCODE"
+bbSpecialBarcode="${defaultSpecialBarcode}"
 bbSpecialActionFile="/etc/barcodebuddy/specialAction.sh"
 
 if promptYesNo "Use curl to send scans to an external Barcode Buddy server?" "n"; then
@@ -287,7 +290,7 @@ if promptYesNo "Use curl to send scans to an external Barcode Buddy server?" "n"
 fi
 
 if promptYesNo "Use a special barcode for custom action?" "n"; then
-  bbSpecialBarcode="$(prompt "Enter your special barcode" "YOUR_CUSTOM_BARCODE")"
+  bbSpecialBarcode="$(prompt "Enter your special barcode (Do not use underscores)" "${defaultSpecialBarcode}")"
   bbSpecialActionFile="$(prompt "Where is your special action file?" "/etc/barcodebuddy/specialAction.sh")"
   echo "To create the special action file:"
   echo "  sudo mkdir -p /etc/barcodebuddy"
