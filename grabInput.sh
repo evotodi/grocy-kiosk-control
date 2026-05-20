@@ -244,6 +244,7 @@ evtest --grab "$deviceToUse" | while read -r line; do
       enteredText+="$key"
     else
       log "Received: ${enteredText}"
+      XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 wlopm --on '*'
       if [[ "$enteredText" == "$SPECIAL_BARCODE" ]]; then
         specialAction
       else
